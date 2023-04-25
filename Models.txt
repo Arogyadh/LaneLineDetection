@@ -1,0 +1,297 @@
+------3 conv layer - model-----
+import pandas as pd
+import numpy as np
+import os
+from sklearn.model_selection import train_test_split
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
+from tensorflow.keras.applications.mobilenet import MobileNet,preprocess_input
+from sklearn.preprocessing import LabelEncoder
+
+
+# Set TensorFlow session to allow dynamic GPU memory allocation
+gpus = tf.config.experimental.list_physical_devices('GPU')
+if gpus:
+  try:
+    for gpu in gpus:
+      tf.config.experimental.set_memory_growth(gpu, True)
+  except RuntimeError as e:
+    print(e)
+
+# Load the styles.csv file into a pandas dataframe and extract the 'id' and 'articleType' columns.
+df = pd.read_csv('styles.csv', usecols=['id', 'articleType'])
+
+
+# Load the images from the 'images' folder using the 'id' column and convert them into a numpy array.
+img_size = (224, 224)
+X = []
+y = []
+for idx, row in df.iterrows():
+    img_path = os.path.join('images_model', str(row['id']) + '.jpg')
+    if os.path.exists(img_path):
+        img = tf.keras.preprocessing.image.load_img(img_path, target_size=img_size)
+        img = tf.keras.preprocessing.image.img_to_array(img)
+        X.append(img)
+        y.append(row['articleType'])
+        print(img_path)
+
+
+X = np.array(X)
+
+le = LabelEncoder()
+y = le.fit_transform(y)
+
+
+print(X)
+print(y)
+
+# Split the data into training and validation sets.
+X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Resize and normalize the images.
+X_train = tf.keras.applications.mobilenet_v2.preprocess_input(X_train)
+X_val = tf.keras.applications.mobilenet_v2.preprocess_input(X_val)
+
+# Define the model architecture.
+model = Sequential([
+    Conv2D(32, (3, 3), activation='relu', input_shape=(img_size[0], img_size[1], 3), padding='same'),
+    MaxPooling2D((2, 2)),
+    Conv2D(64, (3, 3), activation='relu', padding='same'),
+    MaxPooling2D((2, 2)),
+    Conv2D(128, (3, 3), activation='relu', padding='same'),
+    MaxPooling2D((2, 2)),
+    Flatten(),
+    Dense(128, activation='relu'),
+    Dense(64, activation='relu'),
+    Dense(len(np.unique(y)), activation='softmax')
+])
+model.summary()
+
+ #Set up callbacks
+early_stop = EarlyStopping(monitor='val_loss', patience=3, verbose=1, restore_best_weights=True)
+reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.1, patience=2, verbose=1, min_lr=1e-6)
+checkpoint = ModelCheckpoint('model.h5', monitor='val_loss', verbose=1, save_best_only=True)
+
+# Compile the model.
+model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+
+# Train the model on the training set and validate it on the validation set.
+history = model.fit(X_train, y_train, epochs=40, batch_size=32, validation_data=(X_val, y_val),callbacks=[early_stop, reduce_lr, checkpoint])
+
+model.save('cnnmodel_3convlayer_final.h5')
+
+----3 conv layer-app-------
+
+import numpy as np
+import tensorflow
+from tensorflow.keras.preprocessing import image
+from tensorflow.keras.layers import GlobalMaxPooling2D
+from tensorflow.keras.applications.vgg16 import preprocess_input
+from numpy.linalg import norm
+from tensorflow.keras.models import Model
+from PIL import Image
+import os
+from tqdm import tqdm
+import pickle
+
+model = tensorflow.keras.models.load_model('cnnmodel_3convlayer_final.h5')
+print(model.summary())
+
+layer_names = ['conv2d', 'max_pooling2d', 'conv2d_1', 'max_pooling2d_1', 'conv2d_2','max_pooling2d_2']
+intermediate_layer_model = Model(inputs=model.input,
+                                 outputs=[model.get_layer(layer_name).output for layer_name in layer_names])
+
+
+def extract_features(img_path,model):
+    img = image.load_img(img_path,target_size=(224,224))
+    img_array = image.img_to_array(img)
+    expanded_img_array = np.expand_dims(img_array, axis=0)
+    preprocessed_img = preprocess_input(expanded_img_array)
+    result = model.predict(preprocessed_img).flatten()
+    normalized_result = result / norm(result)
+
+    return normalized_result
+
+filenames = []
+
+for file in os.listdir('images_model'):
+    filenames.append(os.path.join('images_model',file))
+
+feature_list = []
+
+for file in tqdm(filenames):
+    feature_list.append(extract_features(file,model))
+
+pickle.dump(feature_list,open('embeddingscnnmodelfinal.pkl','wb'))
+pickle.dump(filenames,open('filenamescnnmodelfinal.pkl','wb'))
+
+
+-----3 conv layer - test-------
+import pickle
+import tensorflow
+import numpy as np
+from numpy.linalg import norm
+from tensorflow.keras.preprocessing import image
+from tensorflow.keras.layers import GlobalMaxPooling2D
+from tensorflow.keras.applications.vgg16 import preprocess_input
+from tensorflow.keras.models import Model
+from sklearn.neighbors import NearestNeighbors
+import cv2
+
+feature_list = np.array(pickle.load(open('embeddingscnnmodelfinal.pkl','rb')))
+filenames = pickle.load(open('filenamescnnmodelfinal.pkl','rb'))
+
+model = tensorflow.keras.models.load_model('cnnmodel_3convlayer_final.h5')
+layer_names = ['conv2d', 'max_pooling2d', 'conv2d_1', 'max_pooling2d_1', 'conv2d_2','max_pooling2d_2']
+intermediate_layer_model = Model(inputs=model.input,
+                                 outputs=[model.get_layer(layer_name).output for layer_name in layer_names])
+
+
+img = image.load_img('sample/checked.jfif',target_size=(224,224))
+img_array = image.img_to_array(img)
+expanded_img_array = np.expand_dims(img_array, axis=0)
+preprocessed_img = preprocess_input(expanded_img_array)
+result = model.predict(preprocessed_img).flatten()
+normalized_result = result / norm(result)
+
+neighbors = NearestNeighbors(n_neighbors=6,algorithm='brute',metric='euclidean')
+neighbors.fit(feature_list)
+
+distances,indices = neighbors.kneighbors([normalized_result])
+
+print(indices)
+
+for file in indices[0][1:6]:
+    temp_img = cv2.imread(filenames[file])
+    cv2.imshow('output',cv2.resize(temp_img,(512,512)))
+    cv2.waitKey(0)
+
+
+
+
+------3 conv layer -main-------
+import streamlit as st
+import os
+from PIL import Image
+import numpy as np
+import pickle
+import tensorflow
+from tensorflow.keras.preprocessing import image
+from tensorflow.keras.layers import GlobalMaxPooling2D
+from tensorflow.keras.applications.densenet import DenseNet121,preprocess_input
+from sklearn.neighbors import NearestNeighbors
+from numpy.linalg import norm
+from tensorflow.keras.models import Model
+
+
+
+feature_list = np.array(pickle.load(open('embeddingscnnmodelfinal.pkl','rb')))
+filenames = pickle.load(open('filenamescnnmodelfinal.pkl','rb'))
+
+model = tensorflow.keras.models.load_model('cnnmodel_3convlayer_final.h5')
+layer_names = ['conv2d', 'max_pooling2d', 'conv2d_1', 'max_pooling2d_1', 'conv2d_2','max_pooling2d_2']
+intermediate_layer_model = Model(inputs=model.input,
+                                 outputs=[model.get_layer(layer_name).output for layer_name in layer_names])
+
+
+st.title('Reverse Image Search')
+
+def save_uploaded_file(uploaded_file):
+    try:
+        with open(os.path.join('uploads',uploaded_file.name),'wb') as f:
+            f.write(uploaded_file.getbuffer())
+        return 1
+    except:
+        return 0
+
+
+def feature_extraction(img_path,model):
+    img = image.load_img(img_path, target_size=(224, 224))
+    img_array = image.img_to_array(img)
+    expanded_img_array = np.expand_dims(img_array, axis=0)
+    preprocessed_img = preprocess_input(expanded_img_array)
+    result = model.predict(preprocessed_img).flatten()
+    normalized_result = result / norm(result)
+
+    return normalized_result
+
+def recommend(features,feature_list):
+    neighbors = NearestNeighbors(n_neighbors=6, algorithm='brute', metric='euclidean')
+    neighbors.fit(feature_list)
+
+    distances, indices = neighbors.kneighbors([features])
+
+    return indices
+
+
+uploaded_file = st.file_uploader("choose an image")
+if uploaded_file is not None:
+    if save_uploaded_file(uploaded_file):
+        #display the file
+        display_image = Image.open(uploaded_file)
+        st.image(display_image)
+
+        features = feature_extraction(os.path.join("uploads",uploaded_file.name),model)
+        #st.text(features)
+        indices = recommend(features,feature_list)
+
+        col1,col2,col3,col4,col5 = st.columns(5)
+
+        with col1:
+            st.image(filenames[indices[0][0]])
+        with col2:
+            st.image(filenames[indices[0][1]])
+        with col3:
+            st.image(filenames[indices[0][2]])
+        with col4:
+            st.image(filenames[indices[0][3]])
+        with col5:
+            st.image(filenames[indices[0][4]])
+    else:
+        st.header("Some error occoured")
+
+
+-----4 layer -----
+model = Sequential([
+    Conv2D(32, (3, 3), activation='relu', input_shape=(img_size[0], img_size[1], 3), padding='same'),
+    MaxPooling2D((2, 2)),
+    Conv2D(64, (3, 3), activation='relu', padding='same'),
+    MaxPooling2D((2, 2)),
+    Conv2D(128, (3, 3), activation='relu', padding='same'),
+    MaxPooling2D((2, 2)),
+    Conv2D(256, (3, 3), activation='relu', padding='same'),
+    MaxPooling2D((2, 2)),
+    Flatten(),
+    Dense(256, activation='relu'),
+    Dense(128, activation='relu'),
+    Dense(64, activation='relu'),
+    Dense(len(np.unique(y)), activation='softmax')
+])
+
+------6layr ------
+ Define the model architecture.
+model = Sequential([
+    Conv2D(32, (3, 3), activation='relu', input_shape=(img_size[0], img_size[1], 3), padding='same'),
+    MaxPooling2D((2, 2)),
+    Conv2D(64, (3, 3), activation='relu', padding='same'),
+    MaxPooling2D((2, 2)),
+    Conv2D(128, (3, 3), activation='relu', padding='same'),
+    MaxPooling2D((2, 2)),
+    Conv2D(256, (3, 3), activation='relu', padding='same'),
+    MaxPooling2D((2, 2)),
+    Conv2D(512, (3, 3), activation='relu', padding='same'),
+    MaxPooling2D((2, 2)),
+    Conv2D(1024, (3, 3), activation='relu', padding='same'),
+    MaxPooling2D((2, 2)),
+    Flatten(),
+    Dense(1024, activation='relu'),
+    Dense(512, activation='relu'),
+    Dense(256, activation='relu'),
+    Dense(128, activation='relu'),
+    Dense(64, activation='relu'),
+    Dropout(0.5),
+    Dense(len(np.unique(y)), activation='softmax')
+])
+model.summary()
